@@ -1,21 +1,12 @@
 {
-  "name": "Homelab Music Player",
-  "short_name": "Homelab Music",
+  "name": "Resona Music",
+  "short_name": "Resona",
+  "description": "Your music, remembered.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#020617",
-  "theme_color": "#0f172a",
-  "description": "Responsive homelab music player with offline playback and lyrics.",
+  "background_color": "#080c21",
+  "theme_color": "#080c21",
   "icons": [
-    {
-      "src": "/favicon.svg",
-      "sizes": "192x192",
-      "type": "image/svg+xml"
-    },
-    {
-      "src": "/favicon.svg",
-      "sizes": "512x512",
-      "type": "image/svg+xml"
-    }
+    { "src": "/favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
   ]
 }
