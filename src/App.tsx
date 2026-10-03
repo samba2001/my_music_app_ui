@@ -1,59 +1,343 @@
-import { useEffect, useRef, useState } from 'react'
-import { ArrowLeft, ChevronRight, Clock3, Download, Heart, Home, Library, Menu, Moon, MoreHorizontal, Pause, Play, Plus, Repeat2, Search, Settings, Shuffle, SkipBack, SkipForward, Sparkles, Upload, UserRound, Video, Volume2, X, Zap } from 'lucide-react'
-import { currentUser as defaultUser, getPlaylist, playlists, songs, type Playlist, type Song, type User } from './data'
-import bundledAudio from './assets/songs/ARZ-KIYA-HAI-(Lyrics)--Anuv-jain--Anuv-Jain.mp3'
-import { AudioSourceNotice } from './components/AudioSourceNotice'
-import { PlaylistPage } from './pages/PlaylistPage'
-import { SongPage } from './pages/SongPage'
+import { useRef, useState, useEffect } from 'react'
+import { Clock3, FastForward, House, ListMusic, LogOut, Menu, Music2, Pause, Play, Plus, Rewind, SkipBack, SkipForward, X } from 'lucide-react'
+import type { Playlist, Song } from './data'
+import * as api from './api'
 import './App.css'
+import ErrorBoundary from './components/ErrorBoundary'
+import { Toast } from './components/Toast'
+import UserProfile from './components/UserProfile'
+import { useAuth } from './authContext'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { PlaylistPage } from './pages/PlaylistPage'
+import { PlaylistLibraryPage } from './pages/PlaylistLibraryPage'
+import NoAccessPage from './pages/NoAccessPage'
+import LandingPage from './pages/LandingPage'
+import { SongPage } from './pages/SongPage'
+import SearchBox from './components/SearchBox'
+import RecentlyPlayed from './components/RecentlyPlayed'
+import { isAdmin } from './auth'
+import { getHistoryRecords, normalizeHistoryItem } from './history'
 
-type View = 'home' | 'search' | 'library' | 'history' | 'profile'
-type GoogleCredentialResponse = { credential: string }
-type GoogleApi = { accounts: { id: { initialize: (options: { client_id: string; callback: (response: GoogleCredentialResponse) => void }) => void; prompt: () => void } } }
-
-function App() {
-  const [user, setUser] = useState<User | null>(() => readStoredUser()); const [view, setView] = useState<View>('home'); const [activePlaylist, setActivePlaylist] = useState<Playlist | null>(null)
-  const [currentSong, setCurrentSong] = useState<Song>(songs[0]); const [isPlaying, setIsPlaying] = useState(false); const [showPlayer, setShowPlayer] = useState(false); const [showAddModal, setShowAddModal] = useState(false); const [sidebarOpen, setSidebarOpen] = useState(false); const [songPageOpen, setSongPageOpen] = useState(false); const [audioSource, setAudioSource] = useState<string>(bundledAudio); const audioRef = useRef<HTMLAudioElement>(null)
-  const playSong = (song: Song) => { setCurrentSong(song); setIsPlaying(true) }; const openPlaylist = (playlist: Playlist) => { setActivePlaylist(playlist); setView('library'); setSidebarOpen(false) }
-  useEffect(() => { const audio = audioRef.current; if (!audio || !audioSource) return; audio.src = audioSource; if (isPlaying) void audio.play().catch(() => setIsPlaying(false)) }, [audioSource, currentSong, isPlaying])
-  useEffect(() => { if (isPlaying && audioRef.current?.src) void audioRef.current.play().catch(() => setIsPlaying(false)); else audioRef.current?.pause() }, [isPlaying])
-  const signOut = () => { setUser(null); localStorage.removeItem('resona-user') }
-  if (!user) return <SignIn onSignIn={(nextUser) => { setUser(nextUser); localStorage.setItem('resona-user', JSON.stringify(nextUser)) }} />
-  return <div className="app-shell"><audio ref={audioRef} onEnded={() => setIsPlaying(false)} /><Sidebar user={user} view={view} open={sidebarOpen} onClose={() => setSidebarOpen(false)} onNavigate={(next) => { setView(next); setActivePlaylist(null); setSongPageOpen(false); setSidebarOpen(false) }} onSignOut={signOut} /><main className="main-content"><header className="topbar"><button className="icon-button menu-button" aria-label="Open menu" onClick={() => setSidebarOpen(true)}><Menu size={21} /></button><div className="topbar-brand"><span className="brand-mark"><Sparkles size={17} /></span><span>resona</span></div><div className="topbar-actions"><button className="icon-button" aria-label="Settings" onClick={() => setView('profile')}><Settings size={18} /></button><button className="avatar-button" onClick={() => setView('profile')}><img src={user.avatar} alt={user.name} /></button></div></header><AudioSourceNotice />{songPageOpen ? <SongPage song={currentSong} playing={isPlaying} onBack={() => setSongPageOpen(false)} onToggle={() => setIsPlaying(!isPlaying)} /> : <>{view === 'home' && <HomeView onPlay={playSong} onPlaylist={openPlaylist} onSearch={() => setView('search')} />}{view === 'search' && <SearchView onPlay={playSong} />}{view === 'library' && (activePlaylist ? <PlaylistPage playlist={activePlaylist} onBack={() => setActivePlaylist(null)} onPlay={playSong} /> : <LibraryView onPlaylist={openPlaylist} onAdd={() => setShowAddModal(true)} />)}{view === 'history' && <HistoryView onPlay={playSong} />}{view === 'profile' && <ProfileView user={user} onSignOut={signOut} />}</>}</main><PlayerBar song={currentSong} playing={isPlaying} hasAudio={Boolean(audioSource)} onToggle={() => setIsPlaying(!isPlaying)} onExpand={() => setShowPlayer(true)} />{showPlayer && <NowPlayingModal song={currentSong} playing={isPlaying} hasAudio={Boolean(audioSource)} onToggle={() => setIsPlaying(!isPlaying)} onOpenSongPage={() => { setShowPlayer(false); setSongPageOpen(true) }} onClose={() => setShowPlayer(false)} />}{showAddModal && <AddLibraryModal onClose={() => setShowAddModal(false)} onAudioReady={(url) => { setAudioSource(url); setShowAddModal(false); setIsPlaying(false) }} />}</div>
+function normalizePlaylist(raw: any, fallbackType: 'default' | 'user'): Playlist {
+  const rawType = raw.playlist_type ?? raw.playlistType
+  return {
+    id: String(raw.id),
+    name: raw.name ?? 'Untitled playlist',
+    playlistType: rawType === 'default' || rawType === 'user' ? rawType : fallbackType,
+    description: raw.description ?? '',
+    cover: raw.cover ?? raw.playlist_cover ?? undefined,
+    songs: (raw.songs ?? []).map((item: any) => {
+      const song = item.song ?? item
+      return {
+        id: String(song.id),
+        title: song.name ?? song.title ?? 'Unknown',
+        artist: song.author ?? song.artist ?? '',
+        duration: song.duration == null ? undefined : String(song.duration),
+        cover: song.cover ?? undefined,
+      }
+    }),
+  }
 }
 
-function readStoredUser(): User | null { try { const stored = localStorage.getItem('resona-user'); return stored ? JSON.parse(stored) as User : null } catch { return null } }
+function normalizePlaylistList(data: any, type: 'default' | 'user'): Playlist[] {
+  const items = Array.isArray(data) ? data : data?.items ?? data?.results ?? data?.playlists ?? []
+  return items.map((playlist: any) => normalizePlaylist(playlist, type))
+}
 
-function userFromGoogleCredential(credential: string): User { const payload = JSON.parse(atob(credential.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))) as { name?: string; email?: string; picture?: string }; return { name: payload.name ?? 'Resona listener', email: payload.email ?? '', avatar: payload.picture ?? defaultUser.avatar } }
+function App() {
+  const [view, setView] = useState<'home'|'playlist'|'library'|'history'|'landing'|'song'|'noaccess'>('landing')
+  const [selectedPlaylistId, setSelectedPlaylistId] = useState<string | number | null>(null)
+  const [selectedPlaylistType, setSelectedPlaylistType] = useState<'default' | 'user'>('user')
+  const [currentPlaylist, setCurrentPlaylist] = useState<Playlist | null>(null)
+  const [history, setHistory] = useState<any[]>([])
+  const [currentSong, setCurrentSong] = useState<Song | null>(null)
+  const [audioSrc, setAudioSrc] = useState<string | null>(null)
+  const [isPlaying, setIsPlaying] = useState(false)
+  const [currentTime, setCurrentTime] = useState<number>(0)
+  const [duration, setDuration] = useState<number>(0)
+  const audioRef = useRef<HTMLAudioElement>(null)
+  const [showProfile, setShowProfile] = useState(false)
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [createPlaylistOnOpen, setCreatePlaylistOnOpen] = useState(false)
+  const auth = useAuth()
 
-function SignIn({ onSignIn }: { onSignIn: (user: User) => void }) {
-  const googleButtonRef = useRef<HTMLDivElement>(null); const [error, setError] = useState(() => import.meta.env.VITE_SSO_CLIENT_ID ? '' : 'Missing VITE_SSO_CLIENT_ID')
+  const qc = useQueryClient()
+  const { data: userPlaylistData = [], isLoading: userPlaylistsLoading } = useQuery({ queryKey: ['user-playlists'], queryFn: api.getPlaylists, enabled: auth.isAuthenticated })
+  const { data: defaultPlaylistData = [], isLoading: defaultPlaylistsLoading } = useQuery({ queryKey: ['default-playlists'], queryFn: api.getDefaultPlaylist, enabled: auth.isAuthenticated })
+  const userPlaylists = normalizePlaylistList(userPlaylistData, 'user')
+  const defaultPlaylists = normalizePlaylistList(defaultPlaylistData, 'default')
+  const allPlaylists = [...userPlaylists, ...defaultPlaylists]
+  const playlistsLoading = userPlaylistsLoading || defaultPlaylistsLoading
+  const playlistQuery = useQuery({
+    queryKey: ['playlist', selectedPlaylistType, selectedPlaylistId],
+    queryFn: () => (selectedPlaylistId ? api.getPlaylistById(selectedPlaylistId) : null),
+    enabled: auth.isAuthenticated && !!selectedPlaylistId,
+  })
+
   useEffect(() => {
-    const clientId = import.meta.env.VITE_SSO_CLIENT_ID as string | undefined; if (!clientId) return
-    const setup = () => { const google = (window as Window & { google?: GoogleApi }).google; if (!google) return; google.accounts.id.initialize({ client_id: clientId, callback: (response) => onSignIn(userFromGoogleCredential(response.credential)) }); google.accounts.id.prompt() }
-    const existing = document.querySelector('script[src="https://accounts.google.com/gsi/client"]'); if (existing) { setup(); return }
-    const script = document.createElement('script'); script.src = 'https://accounts.google.com/gsi/client'; script.async = true; script.onload = setup; script.onerror = () => setError('Google sign-in could not load. Check your network connection.'); document.head.appendChild(script)
-  }, [onSignIn])
-  const openGooglePrompt = () => { const google = (window as Window & { google?: GoogleApi }).google; if (google) google.accounts.id.prompt(); else setError('Google sign-in is still loading.') }
-  return <div className="auth-screen"><div className="auth-nav"><div className="brand-lockup"><span className="brand-mark large"><Sparkles size={24} /></span><span>resona</span></div><span className="auth-nav-note">Your music, remembered.</span></div><section className="auth-content"><div className="eyebrow"><span /> A calmer way to listen</div><h1>Soundtrack the<br /><em>in-between.</em></h1><p>One home for the music that moves you, the moments you replay, and the sounds you haven't found yet.</p><div ref={googleButtonRef} className="google-button google-signin" onClick={openGooglePrompt}><span className="google-g">G</span> Continue with Google <ChevronRight size={17} /></div>{error && <span className="auth-error">{error}</span>}<span className="auth-legal">Google verifies your account. Resona stores only your profile details for this browser.</span></section><div className="auth-art"><div className="vinyl"><div className="vinyl-label">R</div></div><div className="art-card card-back" /><div className="art-card card-front"><img src={getPlaylist('chill-vibes').cover} alt="Warm sunset over water" /><div className="art-caption"><span>Now playing</span><strong>Sunset Lover</strong><small>Petit Biscuit</small></div></div><div className="floating-note note-one"><Volume2 size={15} /> 24.8k listeners</div><div className="floating-note note-two"><Heart size={14} fill="currentColor" /> made for your mood</div></div><div className="auth-footer"><span>EST. 2024</span><span className="footer-line" /><span>MADE FOR THE MOMENT</span></div></div> }
+    if (playlistQuery.data) {
+      const raw = playlistQuery.data.playlist ?? playlistQuery.data
+      setCurrentPlaylist(normalizePlaylist(raw, selectedPlaylistType))
+    }
+  }, [playlistQuery.data, selectedPlaylistType])
 
-function Sidebar({ user, view, open, onClose, onNavigate, onSignOut }: { user: User; view: View; open: boolean; onClose: () => void; onNavigate: (view: View) => void; onSignOut: () => void }) { const nav = [{ id: 'home' as View, label: 'Home', icon: Home }, { id: 'search' as View, label: 'Search', icon: Search }, { id: 'library' as View, label: 'Your Library', icon: Library }, { id: 'history' as View, label: 'History', icon: Clock3 }]; return <><aside className={`sidebar ${open ? 'open' : ''}`}><div className="sidebar-head"><div className="brand-lockup"><span className="brand-mark"><Sparkles size={17} /></span><span>resona</span></div><button className="icon-button close-sidebar" onClick={onClose}><X size={18} /></button></div><p className="nav-label">Discover</p><nav>{nav.map(({ id, label, icon: Icon }) => <button key={id} className={`nav-item ${view === id ? 'active' : ''}`} onClick={() => onNavigate(id)}><Icon size={18} />{label}{id === 'library' && <span className="nav-count">4</span>}</button>)}</nav><p className="nav-label playlists-label">Your playlists</p><div className="mini-playlists">{playlists.slice(0, 3).map((playlist) => <button key={playlist.id} onClick={() => onNavigate('library')}><img src={playlist.cover} alt="" /><span>{playlist.name}</span></button>)}</div><button className="add-playlist" onClick={() => onNavigate('library')}><Plus size={16} /> New playlist</button><div className="sidebar-bottom"><button className="nav-item" onClick={() => onNavigate('profile')}><UserRound size={18} /> Profile</button><button className="nav-item" onClick={onSignOut}><Download size={18} /> Sign out</button><span className="sidebar-user">{user.email}</span></div></aside>{open && <button className="sidebar-scrim" aria-label="Close menu" onClick={onClose} />}</> }
+  useEffect(() => {
+    const a = audioRef.current
+    if (!a) return
+    const onTime = () => setCurrentTime(a.currentTime || 0)
+    const onDuration = () => setDuration(a.duration || 0)
+    const onEnded = async () => {
+      // autoplay next track if available
+      if (!currentPlaylist || !currentSong) { setIsPlaying(false); return }
+      const items = (currentPlaylist.songs || []).map((it: any) => it.song ?? it)
+      const idx = items.findIndex((s: any) => String(s.id) === String(currentSong.id))
+      if (idx >= 0 && idx < items.length - 1) {
+        const s = items[idx + 1]
+        const songObj: Song = { id: String(s.id), title: s.name ?? s.title ?? 'Unknown', artist: s.author ?? s.artist ?? '' }
+        await playSong(songObj)
+      } else {
+        setIsPlaying(false)
+      }
+    }
+    a.addEventListener('timeupdate', onTime)
+    a.addEventListener('loadedmetadata', onDuration)
+    a.addEventListener('ended', onEnded)
+    return () => {
+      a.removeEventListener('timeupdate', onTime)
+      a.removeEventListener('loadedmetadata', onDuration)
+      a.removeEventListener('ended', onEnded)
+    }
+  }, [audioRef.current, audioSrc])
 
-function HomeView({ onPlay, onPlaylist, onSearch }: { onPlay: (song: Song) => void; onPlaylist: (playlist: Playlist) => void; onSearch: () => void }) { return <div className="view fade-in"><div className="welcome-row"><div><span className="eyebrow muted">SATURDAY, SEPTEMBER 20</span><h2>Good evening, <em>Samba.</em></h2><p className="subtext">The right song is closer than you think.</p></div><button className="search-trigger" onClick={onSearch}><Search size={17} /> What do you want to listen to?</button></div><section className="feature-banner"><div><span className="eyebrow light">MADE FOR YOUR EVENING</span><h3>Slow down.<br /><em>Stay awhile.</em></h3><button className="light-button" onClick={() => onPlay(songs[0])}>Listen now <Play size={14} fill="currentColor" /></button></div><img src={getPlaylist('chill-vibes').cover} alt="Sunset over the ocean" /></section><SectionHeading title="Recently played" action="See all" /><div className="song-scroller">{songs.slice(0, 5).map((song) => <SongCard key={song.id} song={song} onPlay={onPlay} />)}</div><SectionHeading title="Made for you" action="View all" /><div className="playlist-grid">{playlists.slice(0, 3).map((playlist) => <PlaylistCard key={playlist.id} playlist={playlist} onClick={() => onPlaylist(playlist)} />)}</div></div> }
+  // keyboard shortcuts are added later after playSong is defined to avoid reference errors
 
-function SearchView({ onPlay }: { onPlay: (song: Song) => void }) { const [query, setQuery] = useState(''); const filtered = songs.filter((song) => `${song.title} ${song.artist} ${song.album}`.toLowerCase().includes(query.toLowerCase())); return <div className="view fade-in"><div className="page-heading"><span className="eyebrow muted">EXPLORE THE SOUND</span><h2>Find your <em>next favorite.</em></h2></div><div className="large-search"><Search size={20} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search songs, artists, albums..." autoFocus /></div><div className="chip-row">{['All', 'Songs', 'Artists', 'Albums', 'Playlists'].map((chip, index) => <button className={index === 0 ? 'selected' : ''} key={chip}>{chip}</button>)}</div><SectionHeading title={query ? `Results for “${query}”` : 'Popular right now'} action="" /><div className="results-list">{filtered.map((song) => <SongRow key={song.id} song={song} onPlay={onPlay} />)}</div></div> }
+  const openPlaylist = (playlist: Playlist) => {
+    setSelectedPlaylistId(playlist.id)
+    setSelectedPlaylistType(playlist.playlistType ?? 'user')
+    setCurrentPlaylist(playlist)
+    setView('playlist')
+  }
 
-function LibraryView({ onPlaylist, onAdd }: { onPlaylist: (playlist: Playlist) => void; onAdd: () => void }) { return <div className="view fade-in"><div className="page-heading library-heading"><div><span className="eyebrow muted">YOUR COLLECTION</span><h2>Your <em>library.</em></h2></div><button className="outline-button" onClick={onAdd}><Plus size={16} /> Add music</button></div><div className="library-tabs"><button className="active">Playlists</button><button>Songs</button><button>Albums</button><button>Artists</button></div><div className="playlist-grid library-grid">{playlists.map((playlist) => <PlaylistCard key={playlist.id} playlist={playlist} onClick={() => onPlaylist(playlist)} />)}</div></div> }
+  const playSong = async (song: Song) => {
+    setCurrentSong(song)
+    setIsPlaying(true)
+    try { const src = await api.getSongStream(song.id); setAudioSrc(src) } catch (e) { console.error(e) }
+  }
 
-function HistoryView({ onPlay }: { onPlay: (song: Song) => void }) { return <div className="view fade-in"><div className="page-heading"><span className="eyebrow muted">KEEP LISTENING</span><h2>Your listening <em>history.</em></h2></div><div className="history-date">Today</div><div className="results-list">{songs.slice(0, 6).map((song) => <SongRow key={song.id} song={song} onPlay={onPlay} />)}</div><div className="history-date">Yesterday</div><div className="results-list">{songs.slice(6).map((song) => <SongRow key={song.id} song={song} onPlay={onPlay} />)}</div></div> }
+  const prevTrack = async () => {
+    if (!currentPlaylist || !currentSong) return
+    const items = (currentPlaylist.songs || []).map((it: any) => it.song ?? it)
+    const idx = items.findIndex((s: any) => String(s.id) === String(currentSong.id))
+    if (idx > 0) {
+      const s = items[idx - 1]
+      const songObj: Song = { id: String(s.id), title: s.name ?? s.title ?? 'Unknown', artist: s.author ?? s.artist ?? '' }
+      await playSong(songObj)
+    }
+  }
 
-function ProfileView({ user, onSignOut }: { user: User; onSignOut: () => void }) { const [dark, setDark] = useState(true); return <div className="view profile-view fade-in"><div className="page-heading"><span className="eyebrow muted">ACCOUNT & SETTINGS</span><h2>Your <em>profile.</em></h2></div><section className="profile-card"><img src={user.avatar} alt={user.name} /><div className="profile-details"><h3>{user.name}</h3><p>{user.email}</p><span className="verified"><span /> Google account connected</span></div><button className="edit-profile"><Settings size={15} /> Settings</button></section><section className="settings-list"><div className="setting-row"><div><Moon size={18} /><div><strong>Appearance</strong><span>Choose how Resona looks for you</span></div></div><button className={`toggle ${dark ? 'on' : ''}`} onClick={() => setDark(!dark)}><span /></button></div><div className="setting-row"><div><Download size={18} /><div><strong>Offline listening</strong><span>Make your playlists available anywhere</span></div></div><button className="toggle"><span /></button></div><div className="setting-row"><div><Zap size={18} /><div><strong>Audio quality</strong><span>High quality · Wi-Fi and cellular</span></div></div><ChevronRight size={17} /></div></section><button className="logout-button" onClick={onSignOut}>Sign out of Resona</button></div> }
+  const nextTrack = async () => {
+    if (!currentPlaylist || !currentSong) return
+    const items = (currentPlaylist.songs || []).map((it: any) => it.song ?? it)
+    const idx = items.findIndex((s: any) => String(s.id) === String(currentSong.id))
+    if (idx >= 0 && idx < items.length - 1) {
+      const s = items[idx + 1]
+      const songObj: Song = { id: String(s.id), title: s.name ?? s.title ?? 'Unknown', artist: s.author ?? s.artist ?? '' }
+      await playSong(songObj)
+    }
+  }
 
-function SongCard({ song, onPlay }: { song: Song; onPlay: (song: Song) => void }) { return <button className="song-card" onClick={() => onPlay(song)}><div className="cover-wrap"><img src={song.cover} alt="" /><span className="cover-play"><Play size={16} fill="currentColor" /></span></div><strong>{song.title}</strong><span>{song.artist}</span></button> }
-function PlaylistCard({ playlist, onClick }: { playlist: Playlist; onClick: () => void }) { return <button className="playlist-card" onClick={onClick}><div className="playlist-cover"><img src={playlist.cover} alt="" /><span className="cover-play"><Play size={16} fill="currentColor" /></span></div><strong>{playlist.name}</strong><span>{playlist.description}</span></button> }
-function SongRow({ song, onPlay, index }: { song: Song; onPlay: (song: Song) => void; index?: number }) { return <button className="song-row" onClick={() => onPlay(song)}>{index && <span className="song-index">{index}</span>}<img src={song.cover} alt="" /><span className="song-row-info"><strong>{song.title}</strong><small>{song.artist} · {song.album}</small></span><Heart className="row-heart" size={16} /><span className="song-duration">{song.duration}</span><MoreHorizontal size={17} className="row-more" /></button> }
-function SectionHeading({ title, action }: { title: string; action: string }) { return <div className="section-heading"><h3>{title}</h3>{action && <button>{action}<ChevronRight size={15} /></button>}</div> }
-function PlayerBar({ song, playing, hasAudio, onToggle, onExpand }: { song: Song; playing: boolean; hasAudio: boolean; onToggle: () => void; onExpand: () => void }) { return <div className="player-bar"><div className="player-progress" /><button className="player-song" onClick={onExpand}><img src={song.cover} alt="" /><span><strong>{song.title}</strong><small>{song.artist}{hasAudio ? '' : ' · Add an MP3 to play'}</small></span></button><div className="player-controls"><button aria-label="Previous"><SkipBack size={16} fill="currentColor" /></button><button className="player-play" disabled={!hasAudio} onClick={onToggle} aria-label={playing ? 'Pause' : 'Play'}>{playing ? <Pause size={17} fill="currentColor" /> : <Play size={17} fill="currentColor" />}</button><button aria-label="Next"><SkipForward size={16} fill="currentColor" /></button></div><div className="player-extra"><Volume2 size={17} /><div className="volume-line"><span /></div><button aria-label="Expand now playing" onClick={onExpand}><ChevronRight size={19} /></button></div></div> }
-function NowPlayingModal({ song, playing, hasAudio, onToggle, onOpenSongPage, onClose }: { song: Song; playing: boolean; hasAudio: boolean; onToggle: () => void; onOpenSongPage: () => void; onClose: () => void }) { const [lyrics, setLyrics] = useState(false); return <div className="modal-overlay"><div className="now-playing"><div className="now-playing-top"><button className="icon-button" onClick={onClose}><ArrowLeft size={19} /></button><span>NOW PLAYING</span><button className="icon-button"><MoreHorizontal size={19} /></button></div><div className="now-playing-content"><div className="now-art"><img src={song.cover} alt="" /><span className="art-shine" /></div><div className="now-song-info"><span className="eyebrow muted">PLAYING FROM CHILL VIBES</span><h2>{song.title}</h2><p>{song.artist}</p><button className="song-page-link" onClick={onOpenSongPage}>Open song page <ChevronRight size={15} /></button><div className="now-progress"><span /><i /></div><div className="time-row"><span>1:42</span><span>{song.duration}</span></div><div className="now-controls"><button><Shuffle size={19} /></button><button><SkipBack size={24} fill="currentColor" /></button><button className="now-play" disabled={!hasAudio} onClick={onToggle}>{playing ? <Pause size={22} fill="currentColor" /> : <Play size={22} fill="currentColor" />}</button><button><SkipForward size={24} fill="currentColor" /></button><button><Repeat2 size={19} /></button></div></div></div><div className="lyrics-section"><div className="lyrics-tabs"><button className={!lyrics ? 'active' : ''} onClick={() => setLyrics(false)}>About</button><button className={lyrics ? 'active' : ''} onClick={() => setLyrics(true)}>Lyrics</button></div>{lyrics ? <p className="lyrics">And I'm lost in the moment<br />I could stay here forever<br />And never leave<br /><br />A little light, a little color<br />The world gets softer<br />When the music plays</p> : <div className="about-row"><span>From <strong>Presence</strong> · 2024{!hasAudio && ' · Add an MP3 from Your Library'}</span><Heart size={17} /></div>}</div></div></div> }
-function AddLibraryModal({ onClose, onAudioReady }: { onClose: () => void; onAudioReady: (url: string) => void }) { const [selectedFiles, setSelectedFiles] = useState<File[]>([]); const [url, setUrl] = useState(''); const canAdd = selectedFiles.length > 0 || url.trim().length > 0; const addFiles = () => { if (selectedFiles[0]) onAudioReady(URL.createObjectURL(selectedFiles[0])); else if (url.trim()) onAudioReady(url.trim()) }; return <div className="modal-overlay"><div className="small-modal"><button className="modal-close" onClick={onClose}><X size={18} /></button><div className="modal-icon"><Video size={22} /></div><span className="eyebrow muted">EXPAND YOUR LIBRARY</span><h2>Add your <em>music.</em></h2><p>Choose up to three MP3 files. Resona uses the first file as the audio source for every mock song.</p><label className="upload-drop"><Upload size={20} /><strong>{selectedFiles.length ? `${selectedFiles.length} MP3 file${selectedFiles.length > 1 ? 's' : ''} selected` : 'Choose MP3 files'}</strong><small>One file is enough for the whole MVP</small><input type="file" accept="audio/mpeg,audio/mp3" multiple onChange={(event) => setSelectedFiles(Array.from(event.target.files ?? []).slice(0, 3))} /></label><div className="url-input"><Video size={17} /><input value={url} onChange={(event) => setUrl(event.target.value)} placeholder="Or paste a direct MP3 URL" /></div><button className="primary-button" disabled={!canAdd} onClick={addFiles}>Use this audio <Play size={16} fill="currentColor" /></button><span className="modal-note">Supported: MP3 files or direct MP3 URLs</span></div></div> }
+  // Set audio source only when it changes (fixes restart-on-pause bug)
+  useEffect(() => {
+    if (!audioRef.current || !audioSrc) return
+    audioRef.current.src = audioSrc
+  }, [audioSrc])
+
+  // Control play/pause independently from source change
+  useEffect(() => {
+    if (!audioRef.current) return
+    if (isPlaying) {
+      void audioRef.current.play().catch(() => setIsPlaying(false))
+    } else {
+      audioRef.current.pause()
+    }
+  }, [isPlaying])
+
+  // keyboard shortcuts: left/right arrows seek 10s, space toggles play, n/p next/prev
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement)?.tagName?.toLowerCase()
+      if (tag === 'input' || tag === 'textarea') return
+      if (e.code === 'Space') { e.preventDefault(); setIsPlaying(p => !p); return }
+      if (e.key === 'ArrowLeft') { if (audioRef.current) audioRef.current.currentTime = Math.max(0, (audioRef.current.currentTime || 0) - 10); return }
+      if (e.key === 'ArrowRight') { if (audioRef.current) audioRef.current.currentTime = (audioRef.current.currentTime || 0) + 10; return }
+      if (e.key.toLowerCase() === 'n') { void (async () => { if (currentPlaylist && currentSong) { const items = (currentPlaylist.songs || []).map((it: any) => it.song ?? it); const idx = items.findIndex((s: any) => String(s.id) === String(currentSong.id)); if (idx >= 0 && idx < items.length - 1) { const s = items[idx + 1]; const songObj: Song = { id: String(s.id), title: s.name ?? s.title ?? 'Unknown', artist: s.author ?? s.artist ?? '' }; await playSong(songObj) } } })(); return }
+      if (e.key.toLowerCase() === 'p') { void (async () => { if (currentPlaylist && currentSong) { const items = (currentPlaylist.songs || []).map((it: any) => it.song ?? it); const idx = items.findIndex((s: any) => String(s.id) === String(currentSong.id)); if (idx > 0) { const s = items[idx - 1]; const songObj: Song = { id: String(s.id), title: s.name ?? s.title ?? 'Unknown', artist: s.author ?? s.artist ?? '' }; await playSong(songObj) } } })(); return }
+    }
+    window.addEventListener('keydown', handler)
+    return () => window.removeEventListener('keydown', handler)
+  }, [audioRef.current, currentPlaylist, currentSong])
+
+  const loadHistory = async () => { const h = await api.getHistory().catch(() => []); setHistory(getHistoryRecords(h)); setView('history') }
+
+  // Listen for requests to show the NoAccess page when a non-admin attempts admin actions
+  useEffect(() => {
+    const handler = () => setView('noaccess')
+    window.addEventListener('resona-show-noaccess', handler as EventListener)
+    return () => window.removeEventListener('resona-show-noaccess', handler as EventListener)
+  }, [])
+
+  useEffect(() => {
+    const onSignedOut = () => setView('landing')
+    const onSignedIn = () => setView('home')
+    window.addEventListener('resona-signed-out', onSignedOut as EventListener)
+    window.addEventListener('resona-signed-in', onSignedIn as EventListener)
+    const onShowLogin = () => setView('landing')
+    window.addEventListener('resona-show-login', onShowLogin as EventListener)
+    // set initial view based on auth state
+    if (!auth.isLoading) setView(auth.isAuthenticated ? 'home' : 'landing')
+    return () => {
+      window.removeEventListener('resona-signed-out', onSignedOut as EventListener)
+      window.removeEventListener('resona-signed-in', onSignedIn as EventListener)
+      window.removeEventListener('resona-show-login', onShowLogin as EventListener)
+    }
+  }, [auth.isAuthenticated, auth.isLoading])
+
+  if (auth.isLoading) return null
+
+  // If user is not authenticated, show only the Landing SSO UI
+  if (!auth.isAuthenticated) {
+    return (
+      <div className="landing-only">
+        <Toast />
+        <LandingPage />
+      </div>
+    )
+  }
+
+  return (
+    <div className="app-shell">
+      {showProfile && <UserProfile onClose={() => setShowProfile(false)} />}
+      <Toast />
+      <audio ref={audioRef} onEnded={() => setIsPlaying(false)} />
+      <header className="mobile-topbar">
+        <button className="mobile-menu-button" type="button" aria-label="Open navigation" aria-expanded={sidebarOpen} onClick={() => setSidebarOpen(true)}><Menu size={21} /></button>
+        <div className="mobile-brand">♫ <span>Charan</span></div>
+        <button className="mobile-profile-button" type="button" aria-label="Open profile" onClick={() => setShowProfile(true)}>
+          {(auth.user?.name || auth.user?.sub || 'U').toString().charAt(0).toUpperCase()}
+        </button>
+      </header>
+      {sidebarOpen && <button className="sidebar-scrim" type="button" aria-label="Close navigation" onClick={() => setSidebarOpen(false)} />}
+      <aside className={`sidebar${sidebarOpen ? ' open' : ''}`}>
+        <div className="sidebar-brand-row">
+          <div className="brand" style={{ fontSize: 20, fontWeight: 700, letterSpacing: '0.5px' }}>♫ Charan</div>
+          <button className="icon-btn desktop-profile-button" onClick={() => setShowProfile(true)} title="Profile" style={{ padding: '8px 12px' }}>
+            <div className="mini-avatar" style={{ width: 36, height: 36, fontSize: 14 }}>{(auth.user?.name || auth.user?.sub || 'U').toString().charAt(0).toUpperCase()}</div>
+          </button>
+          <button className="sidebar-close-button" type="button" aria-label="Close navigation" onClick={() => setSidebarOpen(false)}><X size={19} /></button>
+        </div>
+        <div className="nav" style={{ marginTop: 24 }}>
+          <button className={view === 'home' ? 'active' : ''} onClick={() => { setView('home'); setSidebarOpen(false) }}><House size={17} /> Home</button>
+          <button className={view === 'history' ? 'active' : ''} onClick={() => { setSidebarOpen(false); void loadHistory() }}><Clock3 size={17} /> History</button>
+          <button className={view === 'library' ? 'active' : ''} onClick={() => { setView('library'); setSidebarOpen(false) }}><ListMusic size={17} /> Playlists</button>
+          <hr style={{ margin: '12px 0', border: 'none', borderTop: '1px solid var(--border)' }} />
+          <button onClick={async () => {
+            setSidebarOpen(false)
+            window.dispatchEvent(new CustomEvent('resona-toast', { detail: { message: 'Logged out', type: 'info' } }))
+            await auth.logout()
+          }} style={{ color: 'var(--error-color)' }}><LogOut size={17} /> Logout</button>
+        </div>
+      </aside>
+      <main className="main-content">
+        <div className="main-search"><SearchBox onSelect={(s) => { setCurrentSong(s); setView('song'); setSidebarOpen(false) }} /></div>
+        <ErrorBoundary>
+        {view === 'landing' && <section><LandingPage /></section>}
+        {view === 'home' && <section style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
+          <div className="home-welcome">
+            <div>
+              <h2 style={{ marginBottom: 12 }}>Welcome, {auth.user?.name || 'Music Lover'}</h2>
+              <p style={{ color: 'var(--muted)', marginBottom: 16 }}>Your music, your mood, your way.</p>
+            </div>
+            <button className="home-create-playlist" type="button" onClick={() => { setCreatePlaylistOnOpen(true); setView('library') }}><Plus size={15} /> Create playlist</button>
+          </div>
+          <div>
+            <RecentlyPlayed onPlay={(s) => { setCurrentSong(s); playSong(s); setView('song') }} />
+          </div>
+          <div>
+            <div className="home-playlists-heading">
+              <h3>Your playlists</h3>
+            </div>
+            <div className="home-playlist-grid">
+              {playlistsLoading ? (
+                Array.from({ length: 4 }).map((_, i) => <div key={i} className="playlist-skeleton" aria-hidden />)
+              ) : (
+                allPlaylists.map((playlist) => (
+                  <button className="home-playlist-card" type="button" key={`${playlist.playlistType}-${playlist.id}`} onClick={() => openPlaylist(playlist)}>
+                    <strong>{playlist.name}</strong>
+                    <small>{(playlist.songs || []).length} songs · {playlist.playlistType === 'default' ? 'Default' : 'Yours'}</small>
+                  </button>
+                ))
+              )}
+            </div>
+          </div>
+        </section>}
+        {view === 'library' && <PlaylistLibraryPage
+          userPlaylists={userPlaylists}
+          defaultPlaylists={defaultPlaylists}
+          initialCreateOpen={createPlaylistOnOpen}
+          onCreateDialogOpened={() => setCreatePlaylistOnOpen(false)}
+          onOpen={openPlaylist}
+          onCreated={() => { void qc.invalidateQueries({ queryKey: ['user-playlists'] }) }}
+        />}
+        {view === 'song' && currentSong && <section><SongPage song={currentSong} playing={isPlaying} onBack={() => setView('home')} onToggle={() => { if (isPlaying) setIsPlaying(false); else void playSong(currentSong) }} /></section>}
+        {view === 'playlist' && (
+          playlistQuery.isLoading ? (
+            <section><h2>Loading playlist...</h2><div>{Array.from({ length: 6 }).map((_, i) => <div key={i} className="song-skeleton" aria-hidden />)}</div></section>
+          ) : currentPlaylist ? (
+            <PlaylistPage
+              playlist={currentPlaylist}
+              canAddSongs={currentPlaylist.playlistType === 'default'
+                ? isAdmin(auth.user)
+                : userPlaylists.some((playlist) => playlist.id === currentPlaylist.id)}
+              onBack={() => setView('home')}
+              onPlay={playSong}
+              onSongAdded={() => {
+                void qc.invalidateQueries({ queryKey: ['playlist', selectedPlaylistType, selectedPlaylistId] })
+                void qc.invalidateQueries({ queryKey: ['user-playlists'] })
+                void qc.invalidateQueries({ queryKey: ['default-playlists'] })
+              }}
+            />
+          ) : null
+        )}
+        {view === 'history' && <section className="history-page">
+          <header className="history-heading"><span className="eyebrow muted">YOUR LISTENING</span><h2>History</h2><p>Tracks you played and added to playlists.</p></header>
+          {history.length ? <div className="history-list">{history.map((record, index) => {
+            const item = normalizeHistoryItem(record, index)
+            return <button className="history-row" key={item.key} onClick={() => playSong(item.song)}>
+              <span className="history-track-icon"><Music2 size={17} /></span>
+              <span className="history-track-copy"><strong>{item.song.title}</strong><small>{item.action} · {item.context}</small></span>
+              {item.occurredAt && <time>{item.occurredAt}</time>}
+            </button>
+          })}</div> : <div className="history-empty"><Music2 size={22} /><strong>No activity yet</strong><span>Tracks you play or add will appear here.</span></div>}
+        </section>}
+        {view === 'noaccess' && <section><NoAccessPage /></section>}
+        </ErrorBoundary>
+      </main>
+      <div className="player-bar">
+        <div className="player-controls">
+          <button className="big-btn" aria-label="Previous track" onClick={prevTrack}><SkipBack size={18} /></button>
+          <button className="small-btn" aria-label="Rewind 10 seconds" onClick={() => { if (audioRef.current) audioRef.current.currentTime = Math.max(0, (audioRef.current.currentTime || 0) - 10) }}><Rewind /></button>
+          <button className="play-btn" aria-label={isPlaying ? 'Pause' : 'Play'} onClick={() => setIsPlaying(p => !p)}>{isPlaying ? <Pause /> : <Play />}</button>
+          <button className="small-btn" aria-label="Forward 10 seconds" onClick={() => { if (audioRef.current) audioRef.current.currentTime = (audioRef.current.currentTime || 0) + 10 }}><FastForward /></button>
+          <button className="big-btn" aria-label="Next track" onClick={nextTrack}><SkipForward size={18} /></button>
+        </div>
+        <div className="player-track">
+          <div className="now">{currentSong ? `${currentSong.title} — ${currentSong.artist}` : 'No song'}</div>
+          <input className="seek-slider" type="range" min={0} max={duration || 0} step={0.01} value={Math.min(currentTime, duration || 0)} onChange={(e) => { const v = Number(e.target.value); if (audioRef.current) audioRef.current.currentTime = v; setCurrentTime(v) }} />
+          <div className="time-row" style={{ justifyContent: 'space-between' }}><small>{new Date((currentTime || 0) * 1000).toISOString().substr(14, 5)}</small><small>{isFinite(duration) && duration > 0 ? new Date(duration * 1000).toISOString().substr(14, 5) : '--:--'}</small></div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export default App

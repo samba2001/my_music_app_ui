@@ -11,6 +11,8 @@
   },
   "dependencies": {
     "lucide-react": "^1.47.0",
+    "axios": "^1.5.0",
+    "@tanstack/react-query": "^5.2.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
