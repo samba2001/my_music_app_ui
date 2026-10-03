@@ -10,7 +10,7 @@ export default function LandingPage() {
     <div className="landing view fade-in" style={{ padding: 40, textAlign: 'center', maxWidth: 500, margin: '0 auto', display: 'flex', flexDirection: 'column', justifyContent: 'center', minHeight: '100vh' }}>
       <div style={{ marginBottom: 32 }}>
         <div style={{ fontSize: 56, marginBottom: 16 }}>♫</div>
-        <h1 style={{ fontSize: 36, marginBottom: 8 }}>Welcome to Charan</h1>
+        <h1 style={{ fontSize: 36, marginBottom: 8 }}>Welcome to Charan </h1>
         <p className="subtext" style={{ fontSize: 16, color: 'var(--muted)' }}>Stream your favorite music with ease</p>
       </div>
       <div style={{ marginTop: 32 }}>
